@@ -31,9 +31,9 @@ trait IERC1155<TContractState> {
     );
     fn mint(ref self: TContractState, to: ContractAddress, id: u256, amount: u256,);
 
-    // fn mint_batch(
-    //     ref self: TContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
-    // );
+    fn mint_batch(
+        ref self: TContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
+    );
 }
 
 #[starknet::contract]
@@ -46,15 +46,34 @@ mod ERC1155 {
     use starknet::ContractAddress;
     use starknet::get_caller_address;
     use starknet::contract_address_const;
+    use starknet::get_block_timestamp;
 
     use super::super::erc1155_receiver::ERC1155Receiver;
     use super::super::erc1155_receiver::ERC1155ReceiverTrait;
 
     #[storage]
     struct Storage {
-        _uri: felt252,
+        _uri: ByteArray,
         _balances: LegacyMap::<(u256, ContractAddress), u256>,
         _operator_approvals: LegacyMap::<(ContractAddress, ContractAddress), bool>,
+        treasury: ContractAddress,
+        name: felt252,
+        symbol: felt252,
+        owner: ContractAddress,
+        minters: LegacyMap::<ContractAddress, bool>,
+        soulIdToSoulContainer: LegacyMap::<u256, SoulContainer>,
+        latestUnusedTokenId: u256,
+    }
+
+    #[derive(Drop, Clone, starknet::Store)]
+    struct SoulContainer {
+        soulName: felt252,
+        description: ByteArray,
+        creator: ContractAddress,
+        mintPrice: felt252,
+        registeredTimestamp: u64,
+        startDateTimestamp: u64,
+        endDateTimestamp: u64,
     }
 
     #[event]
@@ -64,6 +83,11 @@ mod ERC1155 {
         TransferBatch: TransferBatch,
         ApprovalForAll: ApprovalForAll,
         URI: URI,
+        MinterAdded: MinterAdded,
+        MinterRemoved: MinterRemoved,
+        TreasureTransferred: TreasureTransferred,
+        CreatedSoul: CreatedSoul,
+        Donate: Donate,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -101,13 +125,56 @@ mod ERC1155 {
 
     #[derive(Drop, starknet::Event)]
     struct URI {
-        value: felt252,
+        value: ByteArray,
         id: u256,
     }
 
+    // WTF SBT Event
+    #[derive(Drop, starknet::Event)]
+    struct MinterAdded {
+        #[key]
+        newMinter: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct MinterRemoved {
+        #[key]
+        oldMinter: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct TreasureTransferred {
+        #[key]
+        user: ContractAddress,
+        #[key]
+        newTreasury: ContractAddress,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct CreatedSoul {
+        #[key]
+        creator: ContractAddress,
+        #[key]
+        tokenId: u256,
+        soulName: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct Donate {
+        #[key]
+        soulID: u256,
+        #[key]
+        donator: ContractAddress,
+        amount: felt252,
+    }
+
     #[constructor]
-    fn constructor(ref self: ContractState, uri_: felt252) {
+    fn constructor(ref self: ContractState, name: felt252, symbol: felt252, uri_: ByteArray, treasury: ContractAddress) {
         self._set_uri(uri_);
+        self.name.write(name);
+        self.symbol.write(symbol);
+        self.treasury.write(treasury);
+        self.owner.write(get_caller_address());
     }
 
     #[abi(embed_v0)]
@@ -179,16 +246,66 @@ mod ERC1155 {
             self._mint(to, id, amount, ArrayTrait::<felt252>::new().span());
         }
 
-        // fn mint_batch(
-        //     ref self: ContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
-        // ) {
-        //     self._mint_batch(to, ids, amounts, ArrayTrait::<felt252>::new().span());
-        // }
+        fn mint_batch(
+            ref self: ContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
+        ) {
+            self._mint_batch(to, ids, amounts, ArrayTrait::<felt252>::new().span());
+        }
     }
 
     #[external(v0)]
-    fn uri(self: @ContractState) -> felt252 {
+    fn uri(self: @ContractState) -> ByteArray {
         self._uri.read()
+    }
+    
+    #[external(v0)]
+    fn createSoul(ref self: ContractState, soulName: felt252, description: ByteArray, mintPrice: felt252, startDateTimestamp: u64, endDateTimestamp: u64) {
+        assert(self.owner.read() == get_caller_address(), 'only owner function');
+        let soulId = self.latestUnusedTokenId.read();
+        let soulContainer = SoulContainer {
+            soulName,
+            description,
+            creator: get_caller_address(),
+            mintPrice,
+            registeredTimestamp: get_block_timestamp(),
+            startDateTimestamp,
+            endDateTimestamp,
+        };
+        self.soulIdToSoulContainer.write(soulId, soulContainer);
+        self.emit(
+            Event::CreatedSoul(
+                CreatedSoul { creator: get_caller_address(), tokenId: soulId, soulName }
+            )
+        );
+
+        self.latestUnusedTokenId.write(soulId + 1);
+    }
+
+    #[external(v0)]
+    fn isCreated(self: @ContractState, soulId: u256) -> bool {
+        if soulId < self.latestUnusedTokenId.read() {
+            true
+        } else {
+            false
+        }
+    }
+
+    #[external(v0)]
+    fn recover(ref self: ContractState, oldOwner: ContractAddress, newOwner: ContractAddress) {
+        assert(self.owner.read() == get_caller_address(), 'only owner function');
+        let mut addressBalances: Array<u256> = array![];
+        let mut soulIdList: Array<u256> = array![];
+        let mut i: u256 = 0;
+        loop {
+            if i >= self.latestUnusedTokenId.read() {
+                break;
+            }
+            let balance = self._balances.read((i, oldOwner));
+            addressBalances.append(balance);
+            soulIdList.append(i);
+            i += 1;
+        };
+        self.safe_batch_transfer_from(oldOwner, newOwner, soulIdList, addressBalances, array![].span());
     }
 
     #[generate_trait]
@@ -441,7 +558,7 @@ mod ERC1155 {
                 )
         }
 
-        fn _set_uri(ref self: ContractState, newuri: felt252) {
+        fn _set_uri(ref self: ContractState, newuri: ByteArray) {
             self._uri.write(newuri);
         }
 
