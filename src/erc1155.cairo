@@ -2,7 +2,7 @@ use starknet::ContractAddress;
 
 
 #[starknet::interface]
-trait IERC1155<TContractState> {
+trait IWTF1155<TContractState> {
     fn balance_of(self: @TContractState, account: ContractAddress, id: u256) -> u256;
     fn balance_of_batch(
         self: @TContractState, accounts: Array<ContractAddress>, ids: Array<u256>
@@ -34,10 +34,26 @@ trait IERC1155<TContractState> {
     fn mint_batch(
         ref self: TContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
     );
+    fn uri(self: @TContractState, soulId: u256) -> ByteArray;
+    fn createSoul(ref self: TContractState, soulName: felt252, description: ByteArray, mintPrice: felt252, startDateTimestamp: u64, endDateTimestamp: u64);
+    fn isCreated(self: @TContractState, soulId: u256) -> bool;
+    fn recover(ref self: TContractState, oldOwner: ContractAddress, newOwner: ContractAddress);
+    fn setbaseURI(ref self: TContractState, base_uri: ByteArray);
+    fn locked(self: @TContractState, sbtId: u256) -> bool;
+    fn getSoulName(self: @TContractState, soulId: u256) -> felt252;
+    fn getSoulDescription(self: @TContractState, soulId: u256) -> ByteArray;
+    fn getSoulMinPrice(self: @TContractState, soulId: u256) -> felt252;
+    fn getSoulRegisteredTimestamp(self: @TContractState, soulId: u256) -> u64;
+    fn getSoulStartDateTimestamp(self: @TContractState, soulId: u256) -> u64;
+    fn getSoulEndDateTimestamp(self: @TContractState, soulId: u256) -> u64;
+    fn isMinter(self: @TContractState, minter: ContractAddress) -> bool;
+    fn addMinter(ref self: TContractState, minter: ContractAddress);
+    fn removeMinter(ref self: TContractState, minter: ContractAddress);
+    fn transferTreasury(ref self: TContractState, newTreasury: ContractAddress);
 }
 
 #[starknet::contract]
-mod ERC1155 {
+mod WTF1155 {
     use core::clone::Clone;
     use core::array::SpanTrait;
     use core::array::ArrayTrait;
@@ -178,7 +194,7 @@ mod ERC1155 {
     }
 
     #[abi(embed_v0)]
-    impl IERC1155impl of super::IERC1155<ContractState> {
+    impl IERC1155impl of super::IWTF1155<ContractState> {
         fn balance_of(self: @ContractState, account: ContractAddress, id: u256) -> u256 {
             assert(!account.is_zero(), 'query for the zero address');
             self._balances.read((id, account))
@@ -251,61 +267,119 @@ mod ERC1155 {
         ) {
             self._mint_batch(to, ids, amounts, ArrayTrait::<felt252>::new().span());
         }
-    }
 
-    #[external(v0)]
-    fn uri(self: @ContractState) -> ByteArray {
-        self._uri.read()
-    }
-    
-    #[external(v0)]
-    fn createSoul(ref self: ContractState, soulName: felt252, description: ByteArray, mintPrice: felt252, startDateTimestamp: u64, endDateTimestamp: u64) {
-        assert(self.owner.read() == get_caller_address(), 'only owner function');
-        let soulId = self.latestUnusedTokenId.read();
-        let soulContainer = SoulContainer {
-            soulName,
-            description,
-            creator: get_caller_address(),
-            mintPrice,
-            registeredTimestamp: get_block_timestamp(),
-            startDateTimestamp,
-            endDateTimestamp,
-        };
-        self.soulIdToSoulContainer.write(soulId, soulContainer);
-        self.emit(
-            Event::CreatedSoul(
-                CreatedSoul { creator: get_caller_address(), tokenId: soulId, soulName }
-            )
-        );
-
-        self.latestUnusedTokenId.write(soulId + 1);
-    }
-
-    #[external(v0)]
-    fn isCreated(self: @ContractState, soulId: u256) -> bool {
-        if soulId < self.latestUnusedTokenId.read() {
-            true
-        } else {
-            false
+        fn uri(self: @ContractState, soulId: u256) -> ByteArray {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self._uri.read()
         }
-    }
+        
+        fn createSoul(ref self: ContractState, soulName: felt252, description: ByteArray, mintPrice: felt252, startDateTimestamp: u64, endDateTimestamp: u64) {
+            assert(self.owner.read() == get_caller_address(), 'only owner function');
+            let soulId = self.latestUnusedTokenId.read();
+            let soulContainer = SoulContainer {
+                soulName,
+                description,
+                creator: get_caller_address(),
+                mintPrice,
+                registeredTimestamp: get_block_timestamp(),
+                startDateTimestamp,
+                endDateTimestamp,
+            };
+            self.soulIdToSoulContainer.write(soulId, soulContainer);
+            self.emit(
+                Event::CreatedSoul(
+                    CreatedSoul { creator: get_caller_address(), tokenId: soulId, soulName }
+                )
+            );
 
-    #[external(v0)]
-    fn recover(ref self: ContractState, oldOwner: ContractAddress, newOwner: ContractAddress) {
-        assert(self.owner.read() == get_caller_address(), 'only owner function');
-        let mut addressBalances: Array<u256> = array![];
-        let mut soulIdList: Array<u256> = array![];
-        let mut i: u256 = 0;
-        loop {
-            if i >= self.latestUnusedTokenId.read() {
-                break;
+            self.latestUnusedTokenId.write(soulId + 1);
+        }
+
+        fn isCreated(self: @ContractState, soulId: u256) -> bool {
+            if soulId < self.latestUnusedTokenId.read() {
+                true
+            } else {
+                false
             }
-            let balance = self._balances.read((i, oldOwner));
-            addressBalances.append(balance);
-            soulIdList.append(i);
-            i += 1;
-        };
-        self.safe_batch_transfer_from(oldOwner, newOwner, soulIdList, addressBalances, array![].span());
+        }
+
+        fn recover(ref self: ContractState, oldOwner: ContractAddress, newOwner: ContractAddress) {
+            assert(self.owner.read() == get_caller_address(), 'only owner function');
+            let mut addressBalances: Array<u256> = array![];
+            let mut soulIdList: Array<u256> = array![];
+            let mut i: u256 = 0;
+            loop {
+                if i >= self.latestUnusedTokenId.read() {
+                    break;
+                }
+                let balance = self._balances.read((i, oldOwner));
+                addressBalances.append(balance);
+                soulIdList.append(i);
+                i += 1;
+            };
+            self.safe_batch_transfer_from(oldOwner, newOwner, soulIdList, addressBalances, array![].span());
+        }
+
+        fn setbaseURI(ref self: ContractState, base_uri: ByteArray) {
+            assert(self.owner.read() == get_caller_address(), 'only owner function');
+            self._set_uri(base_uri);
+        }
+
+        fn locked(self: @ContractState, sbtId: u256) -> bool {
+            assert(self.isCreated(sbtId), 'SoulID not created');
+            true
+        }
+        fn getSoulName(self: @ContractState, soulId: u256) -> felt252 {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self.soulIdToSoulContainer.read(soulId).soulName
+        }
+
+        fn getSoulDescription(self: @ContractState, soulId: u256) -> ByteArray {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self.soulIdToSoulContainer.read(soulId).description
+        }
+
+        fn getSoulMinPrice(self: @ContractState, soulId: u256) -> felt252 {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self.soulIdToSoulContainer.read(soulId).mintPrice
+        }
+
+        fn getSoulRegisteredTimestamp(self: @ContractState, soulId: u256) -> u64 {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self.soulIdToSoulContainer.read(soulId).registeredTimestamp
+        }
+
+        fn getSoulStartDateTimestamp(self: @ContractState, soulId: u256) -> u64 {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self.soulIdToSoulContainer.read(soulId).startDateTimestamp
+        }
+
+        fn getSoulEndDateTimestamp(self: @ContractState, soulId: u256) -> u64 {
+            assert(self.isCreated(soulId), 'SoulID not created');
+            self.soulIdToSoulContainer.read(soulId).endDateTimestamp
+        }
+
+        fn isMinter(self: @ContractState, minter: ContractAddress) -> bool {
+            self.minters.read(minter)
+        }
+
+        fn addMinter(ref self: ContractState, minter: ContractAddress) {
+            assert(self.owner.read() == get_caller_address(), 'only owner function');
+            self.minters.write(minter, true);
+            self.emit(Event::MinterAdded(MinterAdded { newMinter: minter }));
+        }
+
+        fn removeMinter(ref self: ContractState, minter: ContractAddress) {
+            assert(self.owner.read() == get_caller_address(), 'only owner function');
+            self.minters.write(minter, false);
+            self.emit(Event::MinterRemoved(MinterRemoved { oldMinter: minter }));
+        }
+
+        fn transferTreasury(ref self: ContractState, newTreasury: ContractAddress) {
+            assert(self.owner.read() == get_caller_address(), 'only owner function');
+            self.treasury.write(newTreasury);
+            self.emit(Event::TreasureTransferred(TreasureTransferred { user: get_caller_address(), newTreasury }));
+        }
     }
 
     #[generate_trait]
@@ -581,7 +655,9 @@ mod ERC1155 {
             ids: Array<u256>,
             amounts: Array<u256>,
             data: Span<felt252>,
-        ) {}
+        ) {
+            assert(from.is_zero() || to.is_zero() || get_caller_address() == self.owner.read(), 'Non-Transferable!');
+        }
 
         fn _do_safe_transfer_acceptance_check(
             ref self: ContractState,
