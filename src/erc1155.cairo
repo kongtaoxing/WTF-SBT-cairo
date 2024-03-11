@@ -1,8 +1,14 @@
 use starknet::ContractAddress;
-
+use core::pedersen::PedersenTrait;
+use core::hash::{HashStateTrait, HashStateExTrait};
 
 #[starknet::interface]
-trait IWTF1155<TContractState> {
+trait IEtherContract<TContractState> {
+    fn transferFrom(ref self: TContractState, sender: ContractAddress, recipient: ContractAddress, amount: u256) -> bool;
+}
+
+#[starknet::interface]
+trait IWTFSBT1155<TContractState> {
     fn balance_of(self: @TContractState, account: ContractAddress, id: u256) -> u256;
     fn balance_of_batch(
         self: @TContractState, accounts: Array<ContractAddress>, ids: Array<u256>
@@ -29,20 +35,22 @@ trait IWTF1155<TContractState> {
         amounts: Array<u256>,
         data: Span<felt252>
     );
-    fn mint(ref self: TContractState, to: ContractAddress, id: u256, amount: u256,);
+    // fn mint(ref self: TContractState, to: ContractAddress, id: u256, amount: u256);
+
+    fn minterMint(ref self: TContractState, to: ContractAddress, soulId: u256, mintPrice: u256);
 
     fn mint_batch(
         ref self: TContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
     );
     fn uri(self: @TContractState, soulId: u256) -> ByteArray;
-    fn createSoul(ref self: TContractState, soulName: felt252, description: ByteArray, mintPrice: felt252, startDateTimestamp: u64, endDateTimestamp: u64);
+    fn createSoul(ref self: TContractState, soulName: felt252, description: ByteArray, mintPrice: u256, startDateTimestamp: u64, endDateTimestamp: u64);
     fn isCreated(self: @TContractState, soulId: u256) -> bool;
     fn recover(ref self: TContractState, oldOwner: ContractAddress, newOwner: ContractAddress);
     fn setbaseURI(ref self: TContractState, base_uri: ByteArray);
     fn locked(self: @TContractState, sbtId: u256) -> bool;
     fn getSoulName(self: @TContractState, soulId: u256) -> felt252;
     fn getSoulDescription(self: @TContractState, soulId: u256) -> ByteArray;
-    fn getSoulMinPrice(self: @TContractState, soulId: u256) -> felt252;
+    fn getSoulMinPrice(self: @TContractState, soulId: u256) -> u256;
     fn getSoulRegisteredTimestamp(self: @TContractState, soulId: u256) -> u64;
     fn getSoulStartDateTimestamp(self: @TContractState, soulId: u256) -> u64;
     fn getSoulEndDateTimestamp(self: @TContractState, soulId: u256) -> u64;
@@ -50,10 +58,14 @@ trait IWTF1155<TContractState> {
     fn addMinter(ref self: TContractState, minter: ContractAddress);
     fn removeMinter(ref self: TContractState, minter: ContractAddress);
     fn transferTreasury(ref self: TContractState, newTreasury: ContractAddress);
+
+    fn verify_signature(self: @TContractState, account: ContractAddress, soulId: u256, signature: Array<felt252>) -> bool;
+    fn message_hash(self: @TContractState, signer: ContractAddress, account: ContractAddress, soulId: u256) -> felt252;
+    fn mint(ref self: TContractState, account: ContractAddress, soulId: u256, mintPrice: u256, signature: Array<felt252>);
 }
 
 #[starknet::contract]
-mod WTF1155 {
+mod WTFSBT1155 {
     use core::clone::Clone;
     use core::array::SpanTrait;
     use core::array::ArrayTrait;
@@ -63,9 +75,25 @@ mod WTF1155 {
     use starknet::get_caller_address;
     use starknet::contract_address_const;
     use starknet::get_block_timestamp;
+    use starknet::get_tx_info;
+
+    use core::hash::HashStateTrait;
+    use core::pedersen;
+    use openzeppelin::account::interface::{AccountABIDispatcher, AccountABIDispatcherTrait};
+
+    use super::{IEtherContractDispatcher, IEtherContractDispatcherTrait};
 
     use super::super::erc1155_receiver::ERC1155Receiver;
     use super::super::erc1155_receiver::ERC1155ReceiverTrait;
+
+    // sn_keccak('StarkNetDomain(name:felt,version:felt,chainId:felt)')
+    const STARKNET_DOMAIN_TYPE_HASH: felt252 = 0x1bfc207425a47a5dfa1a50a4f5241203f50624ca5fdf5e18755765416b8e288;
+    // sn_keccak("WTFSBT1155(account:felt,soulId:u256)")
+    const SBT_MINT_TYPE_HASH: felt252 = selector!("WTFSBT1155(account:felt,soulId:u256)u256(low:felt,high:felt)");
+    const U256_TYPE_HASH: felt252 = selector!("u256(low:felt,high:felt)");
+    const STARKNET_MESSAGE: felt252 = 'StarkNet Message';
+    const NAME: felt252 = 'WTFSBT1155';
+    const VERSION: felt252 = 1;
 
     #[storage]
     struct Storage {
@@ -79,6 +107,8 @@ mod WTF1155 {
         minters: LegacyMap::<ContractAddress, bool>,
         soulIdToSoulContainer: LegacyMap::<u256, SoulContainer>,
         latestUnusedTokenId: u256,
+        signer: ContractAddress,
+        mintedAddress: LegacyMap::<(ContractAddress, u256), bool>,
     }
 
     #[derive(Drop, Clone, starknet::Store)]
@@ -86,7 +116,7 @@ mod WTF1155 {
         soulName: felt252,
         description: ByteArray,
         creator: ContractAddress,
-        mintPrice: felt252,
+        mintPrice: u256,
         registeredTimestamp: u64,
         startDateTimestamp: u64,
         endDateTimestamp: u64,
@@ -104,6 +134,8 @@ mod WTF1155 {
         TreasureTransferred: TreasureTransferred,
         CreatedSoul: CreatedSoul,
         Donate: Donate,
+        SBTMinted: SBTMinted,
+        SignerChanged: SignerChanged,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -181,20 +213,37 @@ mod WTF1155 {
         soulID: u256,
         #[key]
         donator: ContractAddress,
-        amount: felt252,
+        amount: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct SBTMinted {
+        #[key]
+        account: ContractAddress,
+        #[key]
+        soulId: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct SignerChanged {
+        #[key]
+        oldSigner: ContractAddress,
+        #[key]
+        newSigner: ContractAddress,
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, name: felt252, symbol: felt252, uri_: ByteArray, treasury: ContractAddress) {
+    fn constructor(ref self: ContractState, name: felt252, symbol: felt252, uri_: ByteArray, treasury: ContractAddress, signer: ContractAddress) {
         self._set_uri(uri_);
         self.name.write(name);
         self.symbol.write(symbol);
         self.treasury.write(treasury);
         self.owner.write(get_caller_address());
+        self.signer.write(signer);
     }
 
     #[abi(embed_v0)]
-    impl IERC1155impl of super::IWTF1155<ContractState> {
+    impl IERC1155impl of super::IWTFSBT1155<ContractState> {
         fn balance_of(self: @ContractState, account: ContractAddress, id: u256) -> u256 {
             assert(!account.is_zero(), 'query for the zero address');
             self._balances.read((id, account))
@@ -258,14 +307,38 @@ mod WTF1155 {
             self._safe_batch_transfer_from(from, to, ids, amounts, data);
         }
 
-        fn mint(ref self: ContractState, to: ContractAddress, id: u256, amount: u256,) {
-            self._mint(to, id, amount, ArrayTrait::<felt252>::new().span());
-        }
+        // fn mint(ref self: ContractState, to: ContractAddress, id: u256, amount: u256,) {
+        //     self._mint(to, id, amount, ArrayTrait::<felt252>::new().span());
+        // }
 
         fn mint_batch(
             ref self: ContractState, to: ContractAddress, ids: Array<u256>, amounts: Array<u256>,
         ) {
-            self._mint_batch(to, ids, amounts, ArrayTrait::<felt252>::new().span());
+            // self._mint_batch(to, ids, amounts, ArrayTrait::<felt252>::new().span());
+        }
+
+        fn minterMint(ref self: ContractState, to: ContractAddress, soulId: u256, mintPrice: u256) {
+            assert(self.isMinter(get_caller_address()), 'only minter function');
+            assert(self.isCreated(soulId), 'SoulID not created');
+            let startDateTimeStamp = self.getSoulStartDateTimestamp(soulId);
+            assert(startDateTimeStamp <= get_block_timestamp(), 'mint not started');
+            assert(mintPrice >= self.getSoulMinPrice(soulId), 'mint price not enough');
+            let endDateTimeStamp = self.getSoulEndDateTimestamp(soulId);
+            assert(endDateTimeStamp > get_block_timestamp() || endDateTimeStamp == 0, 'mint ended');
+
+            let ca_ether = contract_address_const::<0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7>();
+            let ether_contract = IEtherContractDispatcher { contract_address: ca_ether };
+            let transfer_result = ether_contract.transferFrom(
+                get_caller_address(),
+                self.treasury.read(),
+                mintPrice
+            );
+            if transfer_result {
+                self.emit(Event::Donate(Donate { soulID: soulId, donator: get_caller_address(), amount: mintPrice }));
+                self._mint(to, soulId, 1, ArrayTrait::<felt252>::new().span());
+                self.emit(Event::SBTMinted(SBTMinted { account: to, soulId: soulId }));
+            }
+
         }
 
         fn uri(self: @ContractState, soulId: u256) -> ByteArray {
@@ -273,7 +346,7 @@ mod WTF1155 {
             self._uri.read()
         }
         
-        fn createSoul(ref self: ContractState, soulName: felt252, description: ByteArray, mintPrice: felt252, startDateTimestamp: u64, endDateTimestamp: u64) {
+        fn createSoul(ref self: ContractState, soulName: felt252, description: ByteArray, mintPrice: u256, startDateTimestamp: u64, endDateTimestamp: u64) {
             assert(self.owner.read() == get_caller_address(), 'only owner function');
             let soulId = self.latestUnusedTokenId.read();
             let soulContainer = SoulContainer {
@@ -339,7 +412,7 @@ mod WTF1155 {
             self.soulIdToSoulContainer.read(soulId).description
         }
 
-        fn getSoulMinPrice(self: @ContractState, soulId: u256) -> felt252 {
+        fn getSoulMinPrice(self: @ContractState, soulId: u256) -> u256 {
             assert(self.isCreated(soulId), 'SoulID not created');
             self.soulIdToSoulContainer.read(soulId).mintPrice
         }
@@ -380,6 +453,88 @@ mod WTF1155 {
             self.treasury.write(newTreasury);
             self.emit(Event::TreasureTransferred(TreasureTransferred { user: get_caller_address(), newTreasury }));
         }
+        
+        fn verify_signature(self: @ContractState, account: ContractAddress, soulId: u256, signature: Array<felt252>) -> bool {
+            let signer = self.signer.read();
+            let hash = self.message_hash(signer, account, soulId);
+            let is_valid_signature_felt = AccountABIDispatcher { contract_address: signer }
+                .is_valid_signature(:hash, :signature);
+        
+            // Check either 'VALID' or True for backwards compatibility.
+            is_valid_signature_felt == starknet::VALIDATED
+                || is_valid_signature_felt == 1
+        }
+
+        fn message_hash(self: @ContractState, signer: ContractAddress, account: ContractAddress, soulId: u256) -> felt252 {
+            let mut send_message_inputs = array![
+                SBT_MINT_TYPE_HASH,
+                account.into(),  // address in signature
+                hash_u256(soulId)
+            ].span();
+            let send_message_hash = pedersen_hash_span(elements: send_message_inputs);
+            let domain = calc_domain_hash();
+            let mut message_inputs = array![
+                STARKNET_MESSAGE,
+                domain,
+                signer.into(),  // signer's address
+                send_message_hash
+            ].span();
+            pedersen_hash_span(elements: message_inputs)
+        }
+
+        fn mint(ref self: ContractState, account: ContractAddress, soulId: u256, mintPrice: u256, signature: Array<felt252>) {
+            assert(!self.mintedAddress.read((account, soulId)), 'Already minted');
+            assert(self.verify_signature(account, soulId, signature), 'Invalid signature');
+            assert(self.isCreated(soulId), 'SoulID not created');
+            let startDateTimeStamp = self.getSoulStartDateTimestamp(soulId);
+            assert(startDateTimeStamp <= get_block_timestamp(), 'mint not started');
+            assert(mintPrice >= self.getSoulMinPrice(soulId), 'mint price not enough');
+            let endDateTimeStamp = self.getSoulEndDateTimestamp(soulId);
+            assert(endDateTimeStamp > get_block_timestamp() || endDateTimeStamp == 0, 'mint ended');
+
+            let ca_ether = contract_address_const::<0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7>();
+            let ether_contract = IEtherContractDispatcher { contract_address: ca_ether };
+            let transfer_result = ether_contract.transferFrom(
+                get_caller_address(),
+                self.treasury.read(),
+                mintPrice
+            );
+            if transfer_result {
+                self.emit(Event::Donate(Donate { soulID: soulId, donator: get_caller_address(), amount: mintPrice }));
+                self._mint(account, soulId, 1, ArrayTrait::<felt252>::new().span());
+                self.mintedAddress.write((account, soulId), true);
+                self.emit(Event::SBTMinted(SBTMinted { account, soulId }));
+            }
+        }
+    }
+
+    fn hash_u256(value: u256) -> felt252 {
+        let mut inputs = array![U256_TYPE_HASH, value.low.into(), value.high.into()].span();
+        pedersen_hash_span(elements: inputs)
+    }
+
+    fn calc_domain_hash() -> felt252 {
+        let mut domain_state_inputs = array![
+            STARKNET_DOMAIN_TYPE_HASH, NAME, VERSION, get_tx_info().unbox().chain_id
+        ].span();
+        pedersen_hash_span(elements: domain_state_inputs)
+    }
+
+    fn pedersen_hash_span(mut elements: Span<felt252>) -> felt252 {
+        let number_of_elements = elements.len();
+        assert(number_of_elements > 0, 'Requires at least one element');
+    
+        // Pad with 0.
+        let mut current: felt252 = 0;
+        loop {
+            // Pop elements and apply hash.
+            match elements.pop_front() {
+                Option::Some(next) => { current = pedersen::pedersen(current, *next); },
+                Option::None(()) => { break; },
+            };
+        };
+        // Hash with number of elements.
+        pedersen::pedersen(current, number_of_elements.into())
     }
 
     #[generate_trait]
