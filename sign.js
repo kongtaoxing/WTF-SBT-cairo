@@ -1,4 +1,4 @@
-const { Account, constants, ec, json, stark, Provider, hash, CallData, shortString, RpcProvider, typedData, Contract, uint256 } = require('starknet');
+const { Account, constants, ec, json, stark, Provider, hash, CallData, shortString, RpcProvider, typedData, Contract, uint256, byteArray } = require('starknet');
 require('dotenv').config()
 
 const main = async () => {
@@ -29,6 +29,8 @@ const main = async () => {
       soulId: uint256.bnToUint256(10n),
     },
   };
+
+  console.log(`Public Key: ${ec.starkCurve.getStarkKey(process.env.PRIVATE_KEY)}`)
   
   const provider = new RpcProvider({ nodeUrl: 'https://rpc.starknet-testnet.lava.build/v0_5' });
   const account = new Account(provider, process.env.ADDRESS, process.env.PRIVATE_KEY);
