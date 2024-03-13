@@ -1,7 +1,7 @@
 use starknet::{ContractAddress, contract_address_const, get_caller_address, get_block_number};
 // use core::option::OptionTrait;
 
-use snforge_std::{declare, ContractClassTrait, start_prank, CheatTarget, BlockId};
+use snforge_std::{declare, ContractClassTrait, start_prank, CheatTarget, start_warp, stop_prank};
 
 use debug::PrintTrait;
 
@@ -9,8 +9,8 @@ use wtf_sbt::erc1155::IWTFSBT1155SafeDispatcher;
 use wtf_sbt::erc1155::IWTFSBT1155SafeDispatcherTrait;
 use wtf_sbt::erc1155::IWTFSBT1155Dispatcher;
 use wtf_sbt::erc1155::IWTFSBT1155DispatcherTrait;
-use wtf_sbt::account::IAccountDispatcher;
-use wtf_sbt::account::IAccountDispatcherTrait;
+use wtf_sbt::ethereum::IEthereumDispatcher;
+use wtf_sbt::ethereum::IEthereumDispatcherTrait;
 
 use openzeppelin::account::interface::{AccountABIDispatcher, AccountABIDispatcherTrait};
 
@@ -19,11 +19,18 @@ const PUBLIC_KEY: felt252 = 0x49a1ecb78d4f98eea4c52f2709045d55b05b9c794f7423de50
 const SIG_R: felt252 = 1416359803914146846654857048746954189017143364909180972482536755577398109151;
 const SIG_S: felt252 = 1815054143752800481403014976568430150901385333474638620073401981379008901813;
 
-fn deploy_account(address: ContractAddress) -> ContractAddress {
+fn deploy_account(address: ContractAddress) {
     let contract = declare('Account');
     let args = array![PUBLIC_KEY];
-    contract.deploy_at(@args, address);
-    address
+    let _address = contract.deploy_at(@args, address);
+}
+
+fn deploy_ethereum() -> IEthereumDispatcher {
+    let contract = declare('Ethereum');
+    let ethereum_address = contract_address_const::<0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7>();
+    let args: Array<felt252> = array!['minter_address'];
+    let ethereum_contract_address = contract.deploy_at(@args, ethereum_address);
+    IEthereumDispatcher { contract_address: ethereum_contract_address.unwrap() }
 }
 
 fn deploy_contract(name: felt252, name_: felt252, symbol: felt252, uri_: ByteArray, treasury: ContractAddress, signer: ContractAddress) -> ContractAddress {
@@ -78,7 +85,6 @@ fn test_message_hash() {
 }
 
 #[test]
-// #[fork("GOERLI")]
 fn test_verify_signature() {
     let contract_address = deploy_contract(
         'WTFSBT1155',
@@ -110,4 +116,71 @@ fn test_created() {
     assert(dispatcher.isCreated(0), 'Soul 01 should be created');
     assert(dispatcher.isCreated(1), 'Soul 02 should be created');
     assert(!dispatcher.isCreated(2), 'Soul 03 should not be created');
+}
+
+#[test]
+fn test_mint_with_zero_price() {
+    let dispatcher = set_up();
+    let caller = contract_address_const::<0x05c6accc31f3689571cdf595828163bcfa0e5da7513cbd81d2d65e21e0dbbacb>();
+    let ethereum_dispatcher = deploy_ethereum();
+    let soulId: u256 = 0;
+    let minter = contract_address_const::<'minter_address'>();
+    dispatcher.addMinter(minter);
+    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
+    ethereum_dispatcher.mint();
+    let price = dispatcher.getSoulMinPrice(soulId);
+    ethereum_dispatcher.approve(ethereum_dispatcher.contract_address, price);
+    dispatcher.minterMint(caller, soulId, 0);
+    assert(dispatcher.balance_of(caller, soulId) == 1, 'Invalid balance');
+}
+
+#[test]
+fn test_mint_with_price() {
+    let dispatcher = set_up();
+    let caller = contract_address_const::<0x05c6accc31f3689571cdf595828163bcfa0e5da7513cbd81d2d65e21e0dbbacb>();
+    let ethereum_dispatcher = deploy_ethereum();
+    let soulId: u256 = 1;
+    let minter = contract_address_const::<'minter_address'>();
+    dispatcher.addMinter(minter);
+    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
+    start_warp(CheatTarget::All, get_block_number() + 50);
+    ethereum_dispatcher.mint_amount(minter, 1000);
+    'minter\' eth balance'.print();
+    ethereum_dispatcher.balance_of(minter).print();
+    let price = dispatcher.getSoulMinPrice(soulId);
+    'price'.print();
+    price.print();
+    ethereum_dispatcher.approve(ethereum_dispatcher.contract_address, price);
+    'allowance'.print();
+    ethereum_dispatcher.allowance(minter, ethereum_dispatcher.contract_address).print();
+    dispatcher.minterMint(caller, soulId, price);
+    stop_prank(CheatTarget::One(dispatcher.contract_address));
+    assert(dispatcher.balance_of(caller, soulId) == 1, 'Invalid balance');
+}
+
+#[test]
+fn test_mint_with_signature() {
+    let dispatcher = set_up();
+    let caller = contract_address_const::<0x05c6accc31f3689571cdf595828163bcfa0e5da7513cbd81d2d65e21e0dbbacb>();
+    let ethereum_dispatcher = deploy_ethereum();
+    let soulId: u256 = 1;
+    let minter = contract_address_const::<'minter_address'>();
+    dispatcher.addMinter(minter);
+    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
+    start_warp(CheatTarget::All, get_block_number() + 50);
+    ethereum_dispatcher.mint_amount(minter, 1000);
+    let price = dispatcher.getSoulMinPrice(soulId);
+    ethereum_dispatcher.approve(ethereum_dispatcher.contract_address, price);
+    let message_hash = dispatcher.message_hash(
+        ethereum_dispatcher.contract_address,
+        minter,
+        soulId,
+    );
+    let signature = array![
+        SIG_R,
+        SIG_S
+    ];
+    dispatcher.minterMintWithSignature(caller, soulId, price, message_hash, signature);
+    stop_prank(CheatTarget::One(dispatcher.contract_address));
+    assert(dispatcher.balance_of(caller, soulId) == 1, 'Invalid balance');
 }
