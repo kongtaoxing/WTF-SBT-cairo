@@ -79,6 +79,7 @@ mod WTFSBT1155 {
 
     use core::hash::HashStateTrait;
     use core::pedersen;
+    use core::debug::PrintTrait;
     use openzeppelin::account::interface::{AccountABIDispatcher, AccountABIDispatcherTrait};
 
     use super::{IEtherContractDispatcher, IEtherContractDispatcherTrait};
@@ -328,17 +329,14 @@ mod WTFSBT1155 {
 
             let ca_ether = contract_address_const::<0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7>();
             let ether_contract = IEtherContractDispatcher { contract_address: ca_ether };
-            let transfer_result = ether_contract.transferFrom(
+            ether_contract.transferFrom(
                 get_caller_address(),
                 self.treasury.read(),
                 mintPrice
             );
-            if transfer_result {
-                self.emit(Event::Donate(Donate { soulID: soulId, donator: get_caller_address(), amount: mintPrice }));
-                self._mint(to, soulId, 1, ArrayTrait::<felt252>::new().span());
-                self.emit(Event::SBTMinted(SBTMinted { account: to, soulId: soulId }));
-            }
-
+            self.emit(Event::Donate(Donate { soulID: soulId, donator: get_caller_address(), amount: mintPrice }));
+            self._mint(to, soulId, 1, ArrayTrait::<felt252>::new().span());
+            self.emit(Event::SBTMinted(SBTMinted { account: to, soulId: soulId }));
         }
 
         fn uri(self: @ContractState, soulId: u256) -> ByteArray {
@@ -494,17 +492,15 @@ mod WTFSBT1155 {
 
             let ca_ether = contract_address_const::<0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7>();
             let ether_contract = IEtherContractDispatcher { contract_address: ca_ether };
-            let transfer_result = ether_contract.transferFrom(
+            ether_contract.transferFrom(
                 get_caller_address(),
                 self.treasury.read(),
                 mintPrice
             );
-            if transfer_result {
-                self.emit(Event::Donate(Donate { soulID: soulId, donator: get_caller_address(), amount: mintPrice }));
-                self._mint(account, soulId, 1, ArrayTrait::<felt252>::new().span());
-                self.mintedAddress.write((account, soulId), true);
-                self.emit(Event::SBTMinted(SBTMinted { account, soulId }));
-            }
+            self.emit(Event::Donate(Donate { soulID: soulId, donator: get_caller_address(), amount: mintPrice }));
+            self._mint(account, soulId, 1, ArrayTrait::<felt252>::new().span());
+            self.mintedAddress.write((account, soulId), true);
+            self.emit(Event::SBTMinted(SBTMinted { account, soulId }));
         }
     }
 

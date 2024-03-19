@@ -19,6 +19,9 @@ const PUBLIC_KEY: felt252 = 0x49a1ecb78d4f98eea4c52f2709045d55b05b9c794f7423de50
 const SIG_R: felt252 = 1416359803914146846654857048746954189017143364909180972482536755577398109151;
 const SIG_S: felt252 = 1815054143752800481403014976568430150901385333474638620073401981379008901813;
 
+const SIG_R_1: felt252 = 3203160333220439876624667650912122799896083834828626196970669695986652451800;
+const SIG_S_1: felt252 = 2264753758465073240970901686848920989734552042871794321484102122403790193778;
+
 fn deploy_account(address: ContractAddress) {
     let contract = declare('Account');
     let args = array![PUBLIC_KEY];
@@ -142,17 +145,13 @@ fn test_mint_with_price() {
     let soulId: u256 = 1;
     let minter = contract_address_const::<'minter_address'>();
     dispatcher.addMinter(minter);
-    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
     start_warp(CheatTarget::All, get_block_number() + 50);
     ethereum_dispatcher.mint_amount(minter, 1000);
-    'minter\' eth balance'.print();
-    ethereum_dispatcher.balance_of(minter).print();
     let price = dispatcher.getSoulMinPrice(soulId);
-    'price'.print();
-    price.print();
-    ethereum_dispatcher.approve(ethereum_dispatcher.contract_address, price);
-    'allowance'.print();
-    ethereum_dispatcher.allowance(minter, ethereum_dispatcher.contract_address).print();
+    start_prank(CheatTarget::One(ethereum_dispatcher.contract_address), minter);
+    ethereum_dispatcher.approve(dispatcher.contract_address, price);
+    stop_prank(CheatTarget::One(ethereum_dispatcher.contract_address));
+    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
     dispatcher.minterMint(caller, soulId, price);
     stop_prank(CheatTarget::One(dispatcher.contract_address));
     assert(dispatcher.balance_of(caller, soulId) == 1, 'Invalid balance');
@@ -162,25 +161,23 @@ fn test_mint_with_price() {
 fn test_mint_with_signature() {
     let dispatcher = set_up();
     let caller = contract_address_const::<0x05c6accc31f3689571cdf595828163bcfa0e5da7513cbd81d2d65e21e0dbbacb>();
+    deploy_account(caller);
     let ethereum_dispatcher = deploy_ethereum();
     let soulId: u256 = 1;
-    let minter = contract_address_const::<'minter_address'>();
-    dispatcher.addMinter(minter);
-    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
+    let minter = contract_address_const::<'random_address'>();
+    // dispatcher.addMinter(minter);
     start_warp(CheatTarget::All, get_block_number() + 50);
     ethereum_dispatcher.mint_amount(minter, 1000);
     let price = dispatcher.getSoulMinPrice(soulId);
-    ethereum_dispatcher.approve(ethereum_dispatcher.contract_address, price);
-    let message_hash = dispatcher.message_hash(
-        ethereum_dispatcher.contract_address,
-        minter,
-        soulId,
-    );
+    start_prank(CheatTarget::One(ethereum_dispatcher.contract_address), minter);
+    ethereum_dispatcher.approve(dispatcher.contract_address, price);
+    stop_prank(CheatTarget::One(ethereum_dispatcher.contract_address));
     let signature = array![
-        SIG_R,
-        SIG_S
+        SIG_R_1,
+        SIG_S_1
     ];
-    dispatcher.minterMintWithSignature(caller, soulId, price, message_hash, signature);
+    start_prank(CheatTarget::One(dispatcher.contract_address), minter);
+    dispatcher.mint(caller, soulId, price, signature);
     stop_prank(CheatTarget::One(dispatcher.contract_address));
     assert(dispatcher.balance_of(caller, soulId) == 1, 'Invalid balance');
 }
